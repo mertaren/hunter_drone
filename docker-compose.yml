@@ -1,0 +1,32 @@
+version: '3.8'
+
+services:
+  hunter_core:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    
+    image: hunter_drone:v1
+    container_name: hunter_drone_container
+    
+    network_mode: host
+    
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+
+    environment:
+      - DISPLAY=${DISPLAY}
+      - QT_X11_NO_MITSHM=1
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=all
+
+    volumes:
+      - /tmp/.X11-unix:/tmp/.X11-unix:rw
+      - .:/root/hunter_ws/src/hunter_drone
+    
+    command: tail -f /dev/null
