@@ -1,0 +1,22 @@
+
+{
+  "name": "Hunter Drone Dev Environment",
+  "dockerComposeFile": "../docker-compose.yml",
+  "service": "hunter_core",
+  "workspaceFolder": "/root/hunter_ws/src/hunter_drone",
+  
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "ms-python.python",           
+        "ms-vscode.cpptools",         
+        "ms-iot.vscode-ros",          
+        "twxs.cmake",                 
+        "yzhang.markdown-all-in-one", 
+        "eamodio.gitlens"             
+      ]
+    }
+  },
+
+  "remoteUser": "root"
+}

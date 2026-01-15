@@ -10,6 +10,7 @@ ENV ROS_DISTRO=humble
 RUN apt-get update && apt-get install -y \
     python3-pip \
     python3-colcon-common-extensions \
+    ros-humble-gazebo-ros-pkgs \
     git \
     wget \
     curl \
@@ -41,4 +42,12 @@ WORKDIR /root/hunter_ws
 # Bash setup
 RUN echo "source /opt/ros/humble/setup.bash" >> /root/.bashrc
 
+RUN echo 'export vblank_mode=0' >> /root/.bashrc && \
+    echo 'export LIBGL_ALWAYS_SOFTWARE=0' >> /root/.bashrc
+
+RUN echo "alias cb='colcon build --symlink-install'" >> /root/.bashrc && \
+    echo "alias ssetup='source install/setup.bash'" >> /root/.bashrc && \
+    echo "alias gzfps='gz stats'" >> /root/.bashrc
+
+RUN echo 'force_color_prompt=yes' >> /root/.bashrc
 CMD ["bash"]
