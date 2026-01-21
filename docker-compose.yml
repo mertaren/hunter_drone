@@ -1,4 +1,7 @@
-version: '3.8'
+version: '3.8' 
+
+volumes:
+  px4_source:
 
 services:
   hunter_core:
@@ -6,11 +9,15 @@ services:
       context: .
       dockerfile: docker/Dockerfile
     
-    image: hunter_drone:v1
+    image: hunter_drone:v1.1 
     container_name: hunter_drone_container
     
-    network_mode: host
-    
+    ports:
+      - "14550:14550/udp"   # QGroundControl
+      - "14557:14557/udp"   # MAVLink Secondary
+      - "14557:14557/tcp"   # Shell/TCP Fallback
+      - "8888:8888/udp"     # Micro-XRCE-DDS Agent
+
     deploy:
       resources:
         reservations:
@@ -24,9 +31,11 @@ services:
       - QT_X11_NO_MITSHM=1
       - NVIDIA_VISIBLE_DEVICES=all
       - NVIDIA_DRIVER_CAPABILITIES=all
+      - PX4_SIM_MODEL=iris_depth_camera 
 
     volumes:
       - /tmp/.X11-unix:/tmp/.X11-unix:rw
       - .:/root/hunter_ws/src/hunter_drone
+      - px4_source:/root/hunter_ws/src/PX4-Autopilot
     
     command: tail -f /dev/null

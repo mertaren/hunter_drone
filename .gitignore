@@ -1,4 +1,4 @@
-# ROS 2 Build files
+# Build files
 build/
 install/
 log/
@@ -12,3 +12,14 @@ __pycache__/
 
 # OS files
 .DS_Store
+
+# Docker Temp
+.devcontainer/
+*.log
+
+# PX4 Source Code
+src/PX4-Autopilot/
+
+# Python Cache
+__pycache__/
+*.pyc

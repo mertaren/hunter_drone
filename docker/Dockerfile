@@ -1,53 +1,82 @@
-
-# ROS2 Humble and tools
 FROM osrf/ros:humble-desktop-full
 
-# Non-Interactive  mode
-ENV DEBIAN_FRONTEND=noninteractive
-ENV ROS_DISTRO=humble
-
-# Utils
 RUN apt-get update && apt-get install -y \
-    python3-pip \
-    python3-colcon-common-extensions \
-    ros-humble-gazebo-ros-pkgs \
     git \
     wget \
     curl \
     nano \
-    software-properties-common \
+    build-essential \
+    cmake \
+    g++ \
+    python3-pip \
+    python3-dev \
     && rm -rf /var/lib/apt/lists/*
 
-# MICRO-XRCE-DDS AGENT
-RUN git clone https://github.com/eProsima/Micro-XRCE-DDS-Agent.git /tmp/Micro-XRCE-DDS-Agent \
-    && cd /tmp/Micro-XRCE-DDS-Agent \
-    && mkdir build && cd build \
-    && cmake .. \
-    && make \
-    && make install \
-    && ldconfig /usr/local/lib/ \
-    && rm -rf /tmp/Micro-XRCE-DDS-Agent
+# PX4 and Gazebo
+RUN apt-get update && apt-get install -y \
+    gazebo \
+    libgazebo-dev \
+    libopencv-dev \
+    protobuf-compiler \
+    libgstreamer-plugins-base1.0-dev \
+    libgstreamer1.0-dev \
+    python3-opencv \
+    python3-numpy \
+    python3-toml \
+    python3-packaging \
+    python3-jinja2 \
+    python3-jsonschema \
+    python3-yaml \
+    python3-lxml \
+    python3-kconfiglib \
+    && rm -rf /var/lib/apt/lists/*
 
-
-# CV Stack
+# Python libs
 RUN pip3 install --no-cache-dir \
-    opencv-python-headless \
-    ultralytics \
-    torch \
-    torchvision
+    empy==3.3.4 \
+    pyros-genmsg \
+    setuptools==59.6.0 \
+    future \
+    kconfiglib \
+    jsonschema \
+    jinja2 \
+    packaging \
+    toml \
+    numpy \
+    lxml
 
-# WS
+# Micro-XRCE-DDS-Agent
+WORKDIR /tmp
+RUN git clone https://github.com/eProsima/Micro-XRCE-DDS-Agent.git && \
+    cd Micro-XRCE-DDS-Agent && \
+    mkdir build && cd build && \
+    cmake .. && \
+    make && \
+    make install && \
+    ldconfig /usr/local/lib/ && \
+    cd /tmp && rm -rf Micro-XRCE-DDS-Agent
+
+# ROS 2 vision packages
+RUN apt-get update && apt-get install -y \
+    ros-humble-cv-bridge \
+    ros-humble-vision-msgs \
+    ros-humble-image-transport \
+    ros-humble-image-transport-plugins \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install YOLOv8 and additional Python vision tools
+RUN pip3 install --no-cache-dir \
+    ultralytics \
+    pyserial \
+    scipy
+
+# Bash settings
+RUN echo "source /opt/ros/humble/setup.bash" >> /root/.bashrc && \
+    echo "export RCUTILS_COLORIZED_OUTPUT=1" >> /root/.bashrc && \
+    echo "alias gzfps='gz stats'" >> /root/.bashrc && \
+    echo "alias cb='colcon build --symlink-install'" >> /root/.bashrc && \
+    echo "alias ssetup='source install/setup.bash'" >> /root/.bashrc
+
 WORKDIR /root/hunter_ws
 
-# Bash setup
-RUN echo "source /opt/ros/humble/setup.bash" >> /root/.bashrc
-
-RUN echo 'export vblank_mode=0' >> /root/.bashrc && \
-    echo 'export LIBGL_ALWAYS_SOFTWARE=0' >> /root/.bashrc
-
-RUN echo "alias cb='colcon build --symlink-install'" >> /root/.bashrc && \
-    echo "alias ssetup='source install/setup.bash'" >> /root/.bashrc && \
-    echo "alias gzfps='gz stats'" >> /root/.bashrc
-
-RUN echo 'force_color_prompt=yes' >> /root/.bashrc
-CMD ["bash"]
+CMD ["tail", "-f", "/dev/null"]
