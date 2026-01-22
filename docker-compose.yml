@@ -33,5 +33,4 @@ services:
       - /tmp/.X11-unix:/tmp/.X11-unix:rw
       - ./src:/root/hunter_ws/src
       - /root/hunter_ws/src/px4_msgs
-
     command: tail -f /dev/null

@@ -22,4 +22,7 @@ src/PX4-Autopilot/
 
 # Python Cache
 __pycache__/
-*.pyc
+*.pycbuild/
+install/
+log/
+__pycache__/
