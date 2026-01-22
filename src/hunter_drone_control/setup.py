@@ -25,6 +25,7 @@ setup(
     entry_points={
         'console_scripts': [
             'simple_controller = hunter_drone_control.simple_controller:main',
+            'yolo_detector = hunter_drone_control.yolo_detector:main',
         ],
     },
 )
