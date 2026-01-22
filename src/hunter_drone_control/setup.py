@@ -26,6 +26,7 @@ setup(
         'console_scripts': [
             'simple_controller = hunter_drone_control.simple_controller:main',
             'yolo_detector = hunter_drone_control.yolo_detector:main',
+            'tracker_node = hunter_drone_control.tracker_node:main',
         ],
     },
 )
