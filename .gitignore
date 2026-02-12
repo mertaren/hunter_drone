@@ -18,7 +18,8 @@ __pycache__/
 *.log
 
 # PX4 Source Code
-src/PX4-Autopilot/
+src/PX4-Autopilot/build/
+src/PX4-Autopilot/Tools/simulation/gazebo-classic/sitl_gazebo-classic/build/
 
 # Python Cache
 __pycache__/

@@ -31,6 +31,10 @@ services:
 
     volumes:
       - /tmp/.X11-unix:/tmp/.X11-unix:rw
-      - ./src:/root/hunter_ws/src
-      - /root/hunter_ws/src/px4_msgs
+      - ./src:/root/hunter_ws/src:rw
+      - ./.git:/root/hunter_ws/.git:rw
+      - px4_build_cache:/root/hunter_ws/src/PX4-Autopilot/build
     command: tail -f /dev/null
+
+volumes:
+  px4_build_cache:
