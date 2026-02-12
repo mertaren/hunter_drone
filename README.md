@@ -146,14 +146,14 @@ Key services defined in `docker-compose.yml`:
 - [x] Basic Offboard Control (Arming, Takeoff & Position Hold)
 - [x] MAVLink telemetry integration with QGroundControl
 
-### Phase 2: Perception 🔄 (In Progress)
-- [ ] Switch PX4 model from `iris` to `iris_depth_camera`
-- [ ] Configure depth camera parameters (FOV, resolution)
-- [ ] YOLOv8 Real-time Inference on `/camera/image_raw` topic
-- [ ] Coordinate Transformation (Pixel to NED World Frame)
-- [ ] Bounding box visualization in RViz2
+### Phase 2: Perception ✅ (Completed)
+- [x] Switch PX4 model from `iris` to `iris_depth_camera`
+- [x] Configure depth camera parameters (FOV, resolution)
+- [x] YOLOv8 Real-time Inference on `/camera/image_raw` topic
+- [x] Coordinate Transformation (Pixel to NED World Frame)
+- [x] Bounding box visualization in RViz2
 
-### Phase 3: State Estimation 📅 (Planned)
+### Phase 3: State Estimation 🔄 (In Progress)
 - [ ] Extended Kalman Filter for target tracking
 - [ ] Sensor fusion (Camera + GPS + IMU)
 - [ ] Prediction during occlusions
