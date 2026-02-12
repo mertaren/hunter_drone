@@ -1,18 +1,12 @@
 import time
 import numpy as np
-from typing import Optional # Type hint
+from typing import Optional
 
 import rclpy
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy, HistoryPolicy
-from rclpy.timer import Timer
 
-from px4_msgs.msg import(
-    OffboardControlMode,
-    TrajectorySetpoint,
-    VehicleCommand,
-    VehicleStatus
-)
+from px4_msgs.msg import OffboardControlMode, TrajectorySetpoint, VehicleCommand, VehicleStatus
 from vision_msgs.msg import Detection2DArray
 
 class VisualTracker(Node):
@@ -21,7 +15,7 @@ class VisualTracker(Node):
 
     Subs to:
         - /vision/detections
-        - ~/.../vehicle_status
+        - ~/.../vehicle_status_v1
     Pub to:
         - ~/.../trajectory_setpoint
         - ~/.../offboard_control_mode
@@ -53,7 +47,7 @@ class VisualTracker(Node):
         self.kp_z = self.get_parameter('kp_z').value
         self.deadzone_x = self.get_parameter('deadzone_x').value
         self.target_timeout = self.get_parameter('target_timeout').value
-        self.enable_control = self.get_parameter('enable_control').value
+        self.enable_control = self.get_parameter('enable_control').get_parameter_value().bool_value
 
         # State variables
         self.target_center_x: Optional[float] = None
@@ -78,7 +72,7 @@ class VisualTracker(Node):
         )
 
         # Control data: Volatile for streaming setpoints to avoid buffer lag
-        qos_control = qos_sensor(
+        qos_control =QoSProfile(
             reliability = ReliabilityPolicy.BEST_EFFORT,
             durability=DurabilityPolicy.VOLATILE,
             history=HistoryPolicy.KEEP_LAST,
@@ -100,12 +94,14 @@ class VisualTracker(Node):
             Detection2DArray, '/vision/detections', self.detection_callback, qos_sensor
         )
         self.vehicle_status_sub = self.create_subscription(
-            VehicleStatus, '/fmu/out/vehicle_status', self.vehicle_status_callback, qos_sensor
+            VehicleStatus, '/fmu/out/vehicle_status_v1', self.vehicle_status_callback, qos_sensor
         )
 
 
         # Main control loop 
         self.timer = self.create_timer(0.05, self.control_loop)
+        
+        self.command_counter = 0 # For spam
 
         self.get_logger().info("Tracker node initialized 'READY!")
         self.get_logger().warn("Set 'enable_control' to True to engage!")
@@ -126,7 +122,7 @@ class VisualTracker(Node):
 
             if not self.target_visible:
                 self.target_visible = True
-                self.get_logger().info("target acquired")
+                self.get_logger().info("Target Acquired!")
         except IndexError:
             pass
     
@@ -148,7 +144,7 @@ class VisualTracker(Node):
         """
 
         try:
-            self.enable_control = self.get_parameter("enable_control").value
+            self.enable_control = self.get_parameter("enable_control").get_parameter_value().bool_value
         except:
             pass
 
@@ -159,6 +155,18 @@ class VisualTracker(Node):
             self.publish_trajectory_setpoint(0.0, 0.0, 0.0, 0.0)
             return
         
+        # Logic evaluated every 0.5s to reduce mavlink bus congestion
+        if self.command_counter % 10 == 0:
+            if self.nav_state != 14: # Offboard mode if not active
+                self.engage_offboard_mode()
+                self.get_logger().info("Switching to offboard mode")
+            elif self.arming_state != 2: # Disarm
+                self.arm()
+                self.get_logger().info("Arming")
+        
+        self.command_counter += 1
+        # ---------------------------------------------
+
         # Target visibilty
         current_time = time.time()
         if(current_time - self.last_detection_time) > self.target_timeout:
@@ -198,10 +206,22 @@ class VisualTracker(Node):
         self.publish_trajectory_setpoint(
             vx=0.0,
             vy=0.0,
-            yz=velocity_z,
+            vz=velocity_z,
             yawspeed= yaw_speed
         )
 
+    # Helper functions
+    def arm(self):
+        """Start"""
+        self.publish_vehicle_command(VehicleCommand.VEHICLE_CMD_COMPONENT_ARM_DISARM, param1=1.0)
+
+    def engage_offboard_mode(self):
+        """Offboard"""
+        self.publish_vehicle_command(
+            VehicleCommand.VEHICLE_CMD_DO_SET_MODE,
+            param1=1.0, # Custom mode
+            param2=6.0  # Offboard mode
+        )
 
     def publish_offboard_mode(self) -> None:
         """
@@ -228,6 +248,19 @@ class VisualTracker(Node):
         msg.timestamp = int(self.get_clock().now().nanoseconds / 1000)
         self.trajectory_pub.publish(msg)
 
+    def publish_vehicle_command(self, command, param1=0.0, param2=0.0):
+        """Generic helper to send MAVLink commands to the FMU."""
+        msg = VehicleCommand()
+        msg.param1 = param1
+        msg.param2 = param2
+        msg.command = command
+        msg.target_system = 1
+        msg.target_component = 1
+        msg.source_system = 1
+        msg.source_component = 1
+        msg.from_external = True
+        msg.timestamp = int(self.get_clock().now().nanoseconds / 1000)
+        self.vehicle_command_pub.publish(msg)
 
 def main(args: str = None) -> None:
     rclpy.init(args=args)

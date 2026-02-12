@@ -14,6 +14,7 @@ import cv2
 import numpy as np
 from cv_bridge import CvBridge, CvBridgeError
 from ultralytics import YOLO
+import torch
 
 
 class YoloDetector(Node):
@@ -38,6 +39,12 @@ class YoloDetector(Node):
         try:
             self.model = YOLO(self.model_path)
             self.get_logger().info(f"Model Loaded: {self.model_path}")
+            if torch.cuda.is_available():
+                device_name = torch.cuda.get_device_name()
+                self.get_logger().info(f"Model loaded on GPU: {device_name}")
+            else:
+                self.model.to('cpu')
+                self.get_logger().warn("CUDA not found")
         except Exception as e:
             self.get_logger().fatal(f'Failed to load model {e}')
             raise RuntimeError('Fail to load model {e}')
@@ -99,13 +106,14 @@ class YoloDetector(Node):
         # Convert ROS image to cv
         try:
             cv_image = self.bridge.imgmsg_to_cv2(msg, desired_encoding='bgr8')
+            cv_image = cv2.resize(cv_image, (640, 480))
         except CvBridgeError as e:
             self.get_logger().error(f'Conversion failed: {e}')
             return
         
         # Inference
         try:
-            results = self.model(cv_image, conf=self.conf_threshold, verbose=False)
+            results = self.model(cv_image, conf=self.conf_threshold, imgsz=640, half=True, verbose=False)
         except Exception as e:
             self.get_logger().error(f'YOLO inference error: {e}')
             # Publish empty detection for handle no data
@@ -115,8 +123,7 @@ class YoloDetector(Node):
         detection_array = Detection2DArray()
         detection_array.header = msg.header
 
-        # Copy for visualization
-        debug_image = cv_image.copy() if self.enable_debug else None
+        should_draw_debug = self.enable_debug and (self.debug_pub.get_subscription_count() > 0)
 
         # Process
         if results and len(results) > 0:
@@ -153,22 +160,21 @@ class YoloDetector(Node):
                     
                     detection_array.detections.append(detection)
 
-                    # Visualization
-                    if self.enable_debug and debug_image is not None:
+                    if should_draw_debug:
                         label = f"{self.model.names[cls_id]} {conf:.2f}"
-                        self._draw_bbox(debug_image, x1, y1, x2, y2, label)
+                        self._draw_bbox(cv_image, x1, y1, x2, y2, label)
         
         self.detection_pub.publish(detection_array)
 
-        if self.enable_debug and debug_image is not None:
+        if should_draw_debug:
             try:
-                debug_msg = self.bridge.cv2_to_imgmsg(debug_image, encoding='bgr8')
+                debug_msg = self.bridge.cv2_to_imgmsg(cv_image, encoding='bgr8')
                 debug_msg.header = msg.header
                 self.debug_pub.publish(debug_msg)
             except CvBridgeError as e:
                 self.get_logger().warn(f'Failed to publish debug image: {e}')
 
-        self._log_performance(start_time) # Performance monitoring
+        self._log_performance(start_time)
 
     def _draw_bbox(self, img: np.ndarray, x1: int, y1: int, x2: int, y2: int, label: str) -> None:
         """
@@ -221,7 +227,7 @@ class YoloDetector(Node):
             fps = self.frame_count / elapsed
             inference_time = (curr_time - start_time) * 1000 # ms
             self.get_logger().info(
-                f'Performance: {fps:.1f} FPS | Inference: {inference_time:.1f} ms | Detections: {len(self.detection_pub.subscriptions)}' 
+                f'Performance: {fps:.1f} FPS | Inference: {inference_time:.1f} ms | Detections: {self.detection_pub.get_subscription_count()}' 
             )
             self.frame_count = 0
             self.last_time = curr_time
