@@ -1,43 +1,52 @@
-# Hunter Drone System
-
-> Dockerized Autonomous Aerial Surveillance System with ROS 2 & PX4
+# 🚁 Hunter Drone — Autonomous Target Tracking & Interception
+**ROS 2 Humble · PX4 Autopilot · Gazebo Classic · Docker**
 
 [![ROS 2 Humble](https://img.shields.io/badge/ROS_2-Humble-22314E?style=for-the-badge&logo=ros&logoColor=white)](https://docs.ros.org/en/humble/)
 [![PX4 Autopilot](https://img.shields.io/badge/PX4-v1.14-005CAB?style=for-the-badge&logo=px4&logoColor=white)](https://px4.io/)
 [![Docker](https://img.shields.io/badge/Container-Docker-2496ED?style=for-the-badge&logo=docker&logoColor=white)](https://www.docker.com/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-FFD700?style=for-the-badge)](https://opensource.org/licenses/MIT)
 
-## Overview
+## Why This Project?
 
-Hunter Drone System is a modular, containerized autonomous UAV development environment designed for ground target detection and tracking. This project integrates flight control dynamics, computer vision, and state estimation capabilities within a high-fidelity simulation environment.
+Most open-source drone projects keep the vehicle at a safe distance from the target and just pan the camera. I wanted to push the system to its limits: the drone extracts real-time 3D world coordinates of a YOLO-detected target from EKF-filtered camera data and flies directly at it in PX4 Offboard mode. There is no "safe distance" logic here.
 
-Designed with scalability and portability in mind, the entire infrastructure runs on Docker, aiming to meet defense industry standards for robust software architecture.
+The entire development runs inside a Dockerized environment using ROS 2 Humble, PX4 Autopilot, and Gazebo.
 
-**Current Status:** Phase 1 Complete - Docker Infrastructure, Robust Offboard Control & PX4 Integration.
+**Current Status:** Phase 2 complete — EKF integration and Tracker Node(Kamikaze) are active.
 
-| System Initialization | Offboard Flight (Armed) |
+### Flight Demos
+| Kamikaze Mode (Zero Distance) | Stalker Mode (3m Safe Distance) |
 | :---: | :---: |
-| *Terminals establishing DDS Bridge* | *Drone holding 5m altitude* |
-| ![Terminal Log](docs/images/terminal_log.jpg) | ![Flight Test](docs/images/qgc_flight.jpg) |
+| *Drone ignores safe distance and intercepts the target directly at head-level.* | *Drone aggressively tracks but maintains a strict 3m operational radius.* |
+| ![Kamikaze Hit](docs/images/kamikaze.gif) | ![Stalker Mode](docs/images/safe.gif) |
 
 ---
 
-## Technical Competencies
+## What I Built
 
-This project serves as a technical portfolio demonstrating engineering competencies in:
+### 2D Pixels → 3D World Coordinates (Pinhole Camera Math)
+Getting YOLO's 2D bounding boxes was the easy part. The real challenge was converting those pixel coordinates into Global NED (North-East-Down) coordinates by **dynamically reading** the camera's intrinsic parameters (`fx`, `fy`, `cx`, `cy`) from the `/camera_info` topic at runtime — instead of hardcoding calibration values. This makes the system work regardless of which camera model is attached.
 
-1.  **UAV Systems Engineering:** Flight dynamics, PX4 autopilot integration, MAVLink protocol communication.
-2.  **DevOps & Simulation:** Docker containerization, Gazebo SITL/HITL simulation environments.
-3.  **Robotics Middleware:** ROS 2 (Humble) architecture, topic/node orchestration, QoS (Quality of Service) management.
-4.  **Defensive Programming:** Implementation of failsafes, handling communication losses, and resolving protocol mismatches (e.g., payload size verification).
+### EKF (Extended Kalman Filter) Integration
+Sensor noise and sudden outlier jumps in distance estimates were corrupting the controller. I wrote an EKF node from scratch to fix this. The filter rejects measurements where the **Mahalanobis distance** exceeds a threshold, and guards against `NaN`/`Inf` values leaking into the Offboard controller and crashing autonomous flight.
 
-**Target Industry:** Defense Systems & Autonomous Robotics.
+### Custom Offboard Controller (Kamikaze Tracker)
+I built a controller that drives the drone in PX4 Offboard mode by publishing velocity commands at 20 Hz. I completely removed the "maintain safe distance" logic and replaced it with an aggressive **error vector approach** — the drone descends to the target's head level (`target_z - 1.0 m`) and flies straight at it until the error reaches zero.
+
+---
+
+## Bugs I Hit & How I Fixed Them
+
+**The Runaway Bug:** In early tests, the closer the drone got to the target, the faster it flew away. After a few hours of log analysis I traced it back to the standard `safe_distance` algorithm fighting against the pursuit logic. I removed the distance-keeping controller entirely and rewrote it to zero out the error vector instead. Problem gone.
+
+**FOV & FPS Tradeoff Breaking EKF:** When I lowered camera resolution to squeeze more FPS out of the simulation, the EKF started producing completely nonsensical coordinates. I went through all the SDF files in the environment, reset them to baseline (640×480, 60° FOV), and moved the calibration to dynamic ROS 2 subscription instead of hardcoded values. That fixed it.
 
 ---
 
 ## System Architecture
 
-The project utilizes a Microservices architecture where the simulation, control logic, and DDS bridge run as isolated but interconnected services.
+The simulation, control logic, and DDS bridge run as isolated but interconnected services.
+
 ```mermaid
 graph TD
     subgraph Host Machine
@@ -47,12 +56,13 @@ graph TD
     subgraph Docker Container
         PX4[PX4 Autopilot SITL] -- UDP:8888 --> DDS[Micro-XRCE-DDS Agent]
         DDS -- ROS Topics --> ROS2[ROS 2 Humble Nodes]
-        
+
         subgraph ROS2 Logic
-            Control[Offboard Controller] -- Trajectory Setpoints --> DDS
-            Vision[YOLOv8 Detector] -- Detection Results --> Control
+            EKF[EKF Node] -- Filtered Target Pos --> Control[Tracker Node]
+            Vision[YOLOv8 Detector] -- Pixel Coords --> EKF
+            Control -- Velocity Setpoints 20Hz --> DDS
         end
-        
+
         PX4 <-.-> |MAVLink:UDP 18570| QGC
     end
 ```
@@ -72,271 +82,164 @@ ROS 2 Nodes  ←→  Micro-XRCE-DDS  ←→  PX4 uORB  ←→  Gazebo Physics
 
 | Domain | Technology | Purpose |
 | :--- | :--- | :--- |
-| **Containerization** | Docker & Compose | Isolated, reproducible development environment |
+| **Containerization** | Docker & Compose | Isolated, reproducible dev environment |
 | **Robotics Framework** | ROS 2 Humble | High-level control and perception logic |
-| **Flight Control** | PX4 Autopilot v1.14 | Low-level flight stabilization and estimation |
+| **Flight Control** | PX4 Autopilot v1.14 | Low-level flight stabilization |
 | **Simulation** | Gazebo Classic | Physics engine and sensor simulation |
 | **Communication** | Micro-XRCE-DDS | RTPS bridge between ROS 2 and PX4 |
-| **Computer Vision** | YOLOv8 + OpenCV | Real-time object detection (Phase 2) |
-| **Language** | Python 3.10 / C++ | Algorithm implementation |
+| **Computer Vision** | YOLOv8 + OpenCV | Real-time object detection |
+| **State Estimation** | Extended Kalman Filter | Noise suppression, outlier rejection |
+| **Language** | Python 3.10 | Algorithm implementation |
 
 ---
 
-## Quick Start (Docker)
+## How to Run
 
-The entire system is containerized, eliminating the need to install ROS 2 or PX4 natively on the host machine.
+The whole system is containerized — no need to install ROS 2 or PX4 natively.
 
 ### Prerequisites
-* Docker & Docker Compose
-* NVIDIA GPU (Recommended for Gazebo GUI)
-* X11 forwarding for GUI (Linux/Mac) or XLaunch (Windows)
-* QGroundControl (Installed on Host)
+- Docker & Docker Compose
+- NVIDIA GPU (recommended for Gazebo GUI)
+- X11 forwarding (Linux/Mac) or XLaunch (Windows)
+- QGroundControl installed on host machine
 
 ### 1. Clone & Build
 ```bash
 git clone https://github.com/mertaren/hunter_drone.git
 cd hunter_drone
 
-# Build and start the entire simulation environment
 docker compose up --build
 ```
 
-### 2. Run the Controller
+### 2. Run the Controllers
 ```bash
-# If container is not running, start it detached:
+# Start container in background if not already running
 docker compose up -d
 
-# Open a new terminal into the container
+# Open a shell inside the container
 docker exec -it hunter_drone_container bash
 
-# Inside the container, launch the Offboard Controller
-ros2 run hunter_drone_control simple_controller
+# Build and source the workspace
+cd /ros2_ws && colcon build --symlink-install
+source install/setup.bash
+
+# Start the EKF node
+ros2 run hunter_drone_control ekf_node &
+
+# Start the Kamikaze Tracker
+ros2 run hunter_drone_control tracker_node
 ```
 
 ### 3. Monitor with QGroundControl
-* Open QGroundControl on your host machine
-* It should auto-connect to `udp://localhost:18570`
-* Observe telemetry and flight status
+Open QGroundControl on the host — it auto-connects to `udp://localhost:18570`.
 
 ---
 
-## Docker Configuration
+## Roadmap
 
-Key services defined in `docker-compose.yml`:
+### Phase 1: Infrastructure ✅
+- [x] Docker environment (ROS 2 + PX4 + Gazebo)
+- [x] Micro-XRCE-DDS bridge configuration
+- [x] Payload size mismatch resolution
+- [x] Basic Offboard control (arm, takeoff, position hold)
+- [x] QGroundControl MAVLink integration
 
-| Service | Ports | Purpose |
-|---------|-------|---------|
-| hunter_drone | 8888 (UDP) | Micro-XRCE-DDS Agent |
-| hunter_drone | 18570 (UDP) | MAVLink (QGroundControl) |
-| hunter_drone | 14550 (UDP) | MAVLink (Backup/Secondary GCS) |
+### Phase 2: Perception & Tracking ✅
+- [x] Switch to `iris_depth_camera` model
+- [x] Dynamic camera calibration from `/camera_info`
+- [x] YOLOv8 real-time inference on camera topic
+- [x] Pixel → NED coordinate transform (Pinhole model)
+- [x] EKF node (Mahalanobis outlier rejection + NaN/Inf guard)
+- [x] Kamikaze Tracker controller (tracker_node)
 
-**Environment Variables:**
-- `DISPLAY`: X11 forwarding for Gazebo GUI
-- `ROS_DOMAIN_ID`: 0 (default, change if running multiple ROS systems)
-- `PX4_SIM_MODEL`: iris (change to `iris_depth_camera` in Phase 2)
-
----
-
-## Development Roadmap
-
-### Phase 1: Foundation ✅ (Completed)
-- [x] Docker Environment Setup (ROS2 + PX4 + Gazebo)
-- [x] Micro-XRCE-DDS Bridge Configuration
-- [x] Protocol Mismatch Resolution (Payload size handling)
-- [x] Basic Offboard Control (Arming, Takeoff & Position Hold)
-- [x] MAVLink telemetry integration with QGroundControl
-
-### Phase 2: Perception 🔄 (In Progress)
-- [ ] Switch PX4 model from `iris` to `iris_depth_camera`
-- [ ] Configure depth camera parameters (FOV, resolution)
-- [ ] YOLOv8 Real-time Inference on `/camera/image_raw` topic
-- [ ] Coordinate Transformation (Pixel to NED World Frame)
-- [ ] Bounding box visualization in RViz2
-
-### Phase 3: State Estimation 📅 (Planned)
-- [ ] Extended Kalman Filter for target tracking
-- [ ] Sensor fusion (Camera + GPS + IMU)
-- [ ] Prediction during occlusions
-- [ ] Track persistence with unique IDs
-
-### Phase 4: Autonomy 📅 (Planned)
-- [ ] Visual servoing (Center target in frame)
-- [ ] Pursuit controller (Follow moving targets)
-- [ ] Search pattern implementation
-- [ ] Mission state machine (SEARCH → TRACK → PURSUE → RTL)
+### Phase 3: Advanced Autonomy 📅
+- [ ] **Occlusion Handling:** When the target moves behind an obstacle, use EKF velocity vectors to predict where it will re-emerge
+- [ ] **Track Persistence:** Integrate DeepSORT to maintain target identity when multiple people are in the scene
+- [ ] Mission state machine: `SEARCH → LOCK → PURSUE → RTL`
 
 ---
 
 ## Repository Structure
 
-The project follows a standard ROS 2 workspace structure within a Dockerized environment.
 ```text
 hunter_drone/
 ├── docker/
-│   └── Dockerfile                    # System environment and dependencies
+│   └── Dockerfile                      # System environment and dependencies
 ├── src/
-│   ├── hunter_drone_control/         # Main control package
+│   ├── hunter_drone_control/
 │   │   ├── hunter_drone_control/
-│   │   │   ├── __init__.py
-│   │   │   ├── simple_controller.py  # Offboard control logic (Phase 1)
-│   │   │   └── yolo_detector.py      # Object detection node (Phase 2)
+│   │   │   ├── ekf_node.py             
+│   │   │   ├── tracker_node.py     
+│   │   │   └── yolo_detector.py        
 │   │   ├── launch/
-│   │   │   └── offboard_control.launch.py
+│   │   │   └── hunter.launch.py
 │   │   ├── config/
-│   │   │   └── controller_params.yaml
+│   │   │   └── ekf_params.yaml
 │   │   ├── package.xml
 │   │   └── setup.py
-│   └── px4_msgs/                     # MAVLink to ROS 2 message definitions
+│   ├── px4_msgs/                       # MAVLink → ROS 2 message definitions
+│   └── PX4-Autopilot/
 ├── docs/
-│   ├── images/                       # Project screenshots and diagrams
-│   └── setup_guide.md                # Detailed installation instructions
-├── docker-compose.yml                # Service orchestration configuration
-├── LICENSE                           # MIT License
-└── README.md                         # Project documentation
+│   └── images/
+├── docker-compose.yml
+└── README.md
 ```
-
----
-
-## Performance Metrics
-
-| Metric | Target | Current Status |
-|--------|--------|----------------|
-| Control Loop Frequency | 20 Hz | ✅ 20 Hz |
-| DDS Bridge Latency | <20 ms | ✅ ~10 ms |
-| Container Startup Time | <60s | ✅ ~45s |
-| Position Hold Accuracy | <0.5m RMS | 🔄 Testing |
-| Detection Framerate (Phase 2) | >20 FPS | 📅 Planned |
 
 ---
 
 ## Troubleshooting
 
-### Container fails to start
-```bash
-# Check Docker daemon status
-sudo systemctl status docker
-
-# Check GPU drivers (if using Gazebo GUI)
-nvidia-smi
-
-# Verify Docker Compose version
-docker compose version
-```
-
 ### No PX4 topics visible in ROS 2
 ```bash
-# Inside container, check if DDS agent is running
 ps aux | grep MicroXRCEAgent
-
-# List available ROS topics (should see /fmu/*)
-ros2 topic list
+ros2 topic list   # should show /fmu/* topics
 
 # Restart DDS agent if needed
-pkill MicroXRCEAgent
-MicroXRCEAgent udp4 -p 8888 &
-```
-
-### QGroundControl cannot connect
-- Ensure port 18570 is exposed in `docker-compose.yml`
-- Check host firewall settings: `sudo ufw status`
-- Verify PX4 is broadcasting MAVLink:
-```bash
-  # Inside container
-  netstat -ulnp | grep 18570
-```
-
-### Gazebo GUI not displaying (X11 issues)
-```bash
-# On host, allow Docker to access X server
-xhost +local:docker
-
-# Verify DISPLAY variable inside container
-docker exec -it hunter_drone_container bash -c "echo $DISPLAY"
+pkill MicroXRCEAgent && MicroXRCEAgent udp4 -p 8888 &
 ```
 
 ### Drone won't arm
-- Check PX4 pre-arm checks in QGroundControl
-- Verify offboard control mode is enabled: `COM_RCL_EXCEPT = 4`
-- Ensure setpoints are being published at >2 Hz:
+- Check pre-arm warnings in QGroundControl
+- Verify `COM_RCL_EXCEPT = 4` is set
+- Confirm setpoints are publishing at 20 Hz:
 ```bash
-  ros2 topic hz /fmu/in/trajectory_setpoint
+ros2 topic hz /fmu/in/trajectory_setpoint
 ```
 
----
+### Gazebo GUI not showing (X11)
+```bash
+xhost +local:docker
+docker exec -it hunter_drone_container bash -c "echo $DISPLAY"
+```
 
-## Demonstrations
-
-📹 **Video Walkthrough:** [YouTube Link] (coming soon)
-
-**Current Capabilities:**
-- ✅ Automated arming sequence
-- ✅ Offboard mode transition
-- ✅ Autonomous takeoff to 5m altitude
-- ✅ Stable position hold (NED frame)
-- ✅ Clean shutdown and disarm
+### EKF producing garbage coordinates
+Check camera settings in SDF files — should be 640×480, 60° FOV:
+```bash
+ros2 topic echo /camera_info --once
+```
 
 ---
 
 ## References
 
-### PX4 Documentation
-- [Offboard Control Guide](https://docs.px4.io/main/en/ros/ros2_comm.html)
-- [MAVROS vs Micro-XRCE-DDS](https://docs.px4.io/main/en/middleware/uxrce_dds.html)
-- [PX4 SITL Simulation](https://docs.px4.io/main/en/simulation/)
-
-### ROS 2 Best Practices
-- [Quality of Service Settings](https://docs.ros.org/en/humble/Concepts/About-Quality-of-Service-Settings.html)
-- [ROS 2 Launch System](https://docs.ros.org/en/humble/Tutorials/Intermediate/Launch/Launch-Main.html)
-
-### Industry Standards
-- DO-178C: Software Considerations in Airborne Systems
-- STANAG 4586: Standard Interfaces of UAV Control System (UCS)
+- [PX4 Offboard Control Guide](https://docs.px4.io/main/en/ros/ros2_comm.html)
+- [Micro-XRCE-DDS Documentation](https://docs.px4.io/main/en/middleware/uxrce_dds.html)
+- [ROS 2 QoS Settings](https://docs.ros.org/en/humble/Concepts/About-Quality-of-Service-Settings.html)
 
 ---
 
 ## Author
 
-**Mert Aren**
-- Statistics Student specializing in Autonomous Systems
-- **Focus:** UAV Control, Sensor Fusion, Computer Vision
-- **Career Goal:** Defense Industry (ASELSAN, Baykar, TUSAŞ)
-- **Contact:** 
-  - GitHub: [@mertaren](https://github.com/mertaren)
-  - Email: mertcodes@gmail.com
-
----
-
-## Contributing
-
-This is a personal portfolio project, but feedback and suggestions are welcome!
-
-1. Fork the repository
-2. Create a feature branch (`git checkout -b feature/YourFeature`)
-3. Commit your changes (`git commit -m 'Add: Your feature description'`)
-4. Push to the branch (`git push origin feature/YourFeature`)
-5. Open a Pull Request
+**Mert Yalçıner** · [@mertaren](https://github.com/mertaren) · mertcodes@gmail.com
 
 ---
 
 ## License
 
-This project is licensed under the MIT License - see [LICENSE](LICENSE) file for details.
-
----
-
-## Acknowledgments
-
-- **PX4 Development Team** - Robust autopilot framework
-- **ROS 2 Community** - Excellent robotics middleware
-- **Gazebo Team** - High-fidelity simulation environment
-- **Docker Community** - Containerization best practices
+MIT License — see [LICENSE](LICENSE) for details.
 
 ---
 
 <div align="center">
 
-**⭐ Star this repository if you find it helpful!**
-
-Built with ❤️ for autonomous systems
-
-</div>
+**⭐ Star the repo if you find it useful!**
