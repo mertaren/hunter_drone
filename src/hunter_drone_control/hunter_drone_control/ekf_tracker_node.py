@@ -15,12 +15,12 @@ from geometry_msgs.msg import PointStamped
 from nav_msgs.msg import Odometry
 
 # Constans
-MAX_DEPTH_AGE_SEC   = 0.50   # Max allowed age for a depth frame
+MAX_DEPTH_AGE_SEC   = 2.0   # Max allowed age for a depth frame
 MAX_DETECT_AGE_SEC  = 0.10   # Max allowed age for a detection
 DEPTH_ROI_HALF      = 4      # ROI: pixels around the center
 DEPTH_MIN_M         = 0.2    # Min valid depth (meters)
 DEPTH_MAX_M         = 50.0   # Max valid depth (meters)
-CHI2_3DOF_99        = 11.34  # Chi-square threshold for 3 DOF at 99% confidence
+CHI2_3DOF_99        = 100.0  # Chi-square threshold 
 
 
 class EKFTracker3D(Node):
@@ -102,6 +102,8 @@ class EKFTracker3D(Node):
             f"  cam_to_body_rpy_deg = {cam_rpy_deg}\n"
             f"  meas_std_base = {self.meas_std_base} m @ {self.meas_std_ref_dist} m ref dist"
         )
+        
+        self.last_meas_time = self.get_clock().now()
 
     # Callbacks
     def cam_info_callback(self, msg):
@@ -263,6 +265,8 @@ class EKFTracker3D(Node):
             # Covariance Update (Joseph form)
             I_KH            = np.eye(6) - K @ H
             self.covariance = I_KH @ self.covariance @ I_KH.T + K @ R_cov @ K.T
+            
+            self.last_meas_time = self.get_clock().now()
 
     def _get_3d_point_from_depth(self, u: int, v: int, depth: float) -> np.ndarray:
         """
@@ -292,6 +296,9 @@ class EKFTracker3D(Node):
     def publish_result(self):
         """Publishes the estimated state only if the filter has been initialized."""
         if not self.is_initialized:
+            return
+        age = (self.get_clock().now() - self.last_meas_time).nanoseconds / 1e9
+        if age > 1.0:
             return
 
         stamp = self.get_clock().now().to_msg()

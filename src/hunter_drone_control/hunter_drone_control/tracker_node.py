@@ -1,4 +1,4 @@
-import time
+import math
 import numpy as np
 from typing import Optional
 
@@ -6,242 +6,179 @@ import rclpy
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy, HistoryPolicy
 
-from px4_msgs.msg import OffboardControlMode, TrajectorySetpoint, VehicleCommand, VehicleStatus
-from vision_msgs.msg import Detection2DArray
+from px4_msgs.msg import OffboardControlMode, TrajectorySetpoint, VehicleCommand, VehicleStatus, VehicleOdometry
+from nav_msgs.msg import Odometry
 
-class VisualTracker(Node):
-    """
-    ROS 2 node for autonomous visual tracking
+# Helper functions
+def get_yaw_from_q(q):
+    q0, q1, q2, q3 = q[0], q[1], q[2], q[3]
+    return math.atan2(2.0 * (q0 * q3 + q1 * q2), 1.0 - 2.0 * (q2 * q2 + q3 * q3))
 
-    Subs to:
-        - /vision/detections
-        - ~/.../vehicle_status_v1
-    Pub to:
-        - ~/.../trajectory_setpoint
-        - ~/.../offboard_control_mode
-    """
+def wrap_pi(angle):
+    return (angle + math.pi) % (2 * math.pi) - math.pi
+
+class TargetTrackerNode(Node):
     def __init__(self) -> None:
         super().__init__('visual_tracker')
 
-        # Image res
-        self.declare_parameter('img_width', 640)
-        self.declare_parameter('img_height', 480)
-
+        # Parameters
+        self.declare_parameter('enable_control', False)       
+        
         # Control gains
-        self.declare_parameter('kp_yaw', 0.002)
-        self.declare_parameter('kp_z', 0.005)
+        self.declare_parameter('kp_xy', 0.4)                  # Forward/lateral speed gain
+        self.declare_parameter('kp_z', 1.0)                   # Vertical speed gain
+        self.declare_parameter('kp_yaw', 0.5)                 # Yaw rotation gain
+        self.declare_parameter('max_speed', 3.0)              # Maximum speed limit (m/s)
 
-        # Pixel margin to ignore small errors
-        self.declare_parameter('deadzone_x', 20)
-
-        # Wait before declaring target loss
-        self.declare_parameter('target_timeout', 2.0)
-
-        # Safety interlock
-        self.declare_parameter('enable_control', False) # Must be set True
-
-        # LOAD PARAMS
-        self.img_width = self.get_parameter('img_width').value
-        self.img_height = self.get_parameter('img_height').value
-        self.kp_yaw = self.get_parameter('kp_yaw').value
-        self.kp_z = self.get_parameter('kp_z').value
-        self.deadzone_x = self.get_parameter('deadzone_x').value
-        self.target_timeout = self.get_parameter('target_timeout').value
-        self.enable_control = self.get_parameter('enable_control').get_parameter_value().bool_value
+        # Load parameters into variables
+        self.enable_control = self.get_parameter('enable_control').value
+        self.kp_xy          = self.get_parameter('kp_xy').value
+        self.kp_z           = self.get_parameter('kp_z').value
+        self.kp_yaw         = self.get_parameter('kp_yaw').value
+        self.max_speed      = self.get_parameter('max_speed').value
 
         # State variables
-        self.target_center_x: Optional[float] = None
-        self.target_center_y: Optional[float] = None
-        self.last_detection_time: float = 0.0
-        self.target_visible: bool = False
-        self.nav_state: int = 0  
-        self.arming_state: int = 0
+        self.drone_pos = np.zeros(3)
+        self.drone_yaw = 0.0
+        self.nav_state = 0
+        self.arming_state = 0
 
-        # Find image center (target setpoint s*)
-        self.cx = self.img_width / 2.0
-        self.cy = self.img_height / 2.0
+        self.target_pos: Optional[np.ndarray] = None
+        self.last_target_time = self.get_clock().now()
+        self.target_timeout_sec = 2.0  # Stop if target is lost for 2 seconds
 
-        # QOS CONFIGURATION
-
-        # Sensor data: Best Effort - drop old data
+        # ROS2 Communation
         qos_sensor = QoSProfile(
-            reliability = ReliabilityPolicy.BEST_EFFORT,
+            reliability=ReliabilityPolicy.BEST_EFFORT,
             durability=DurabilityPolicy.VOLATILE,
             history=HistoryPolicy.KEEP_LAST,
             depth=1
         )
-
-        # Control data: Volatile for streaming setpoints to avoid buffer lag
-        qos_control =QoSProfile(
-            reliability = ReliabilityPolicy.BEST_EFFORT,
-            durability=DurabilityPolicy.VOLATILE,
-            history=HistoryPolicy.KEEP_LAST,
-            depth=1
-        )
-
-        # PUB / SUB
-        self.offboard_mode_pub = self.create_publisher(
-            OffboardControlMode, '/fmu/in/offboard_control_mode', qos_control
-        )
-        self.trajectory_pub = self.create_publisher(
-            TrajectorySetpoint, '/fmu/in/trajectory_setpoint', qos_control
-        )
-        self.vehicle_command_pub = self.create_publisher(
-            VehicleCommand, '/fmu/in/vehicle_command', qos_control
-        )
-
-        self.detection_sub = self.create_subscription(
-            Detection2DArray, '/vision/detections', self.detection_callback, qos_sensor
-        )
-        self.vehicle_status_sub = self.create_subscription(
-            VehicleStatus, '/fmu/out/vehicle_status_v1', self.vehicle_status_callback, qos_sensor
-        )
-
-
-        # Main control loop 
-        self.timer = self.create_timer(0.05, self.control_loop)
         
-        self.command_counter = 0 # For spam
+        # Publishers
+        self.offboard_mode_pub = self.create_publisher(OffboardControlMode, '/fmu/in/offboard_control_mode', qos_sensor)
+        self.trajectory_pub    = self.create_publisher(TrajectorySetpoint, '/fmu/in/trajectory_setpoint', qos_sensor)
+        self.vehicle_cmd_pub   = self.create_publisher(VehicleCommand, '/fmu/in/vehicle_command', qos_sensor)
 
-        self.get_logger().info("Tracker node initialized 'READY!")
-        self.get_logger().warn("Set 'enable_control' to True to engage!")
+        # Subscribers
+        self.create_subscription(VehicleStatus, '/fmu/out/vehicle_status_v1', self.status_cb, qos_sensor)
+        self.create_subscription(VehicleOdometry, '/fmu/out/vehicle_odometry', self.drone_odom_cb, qos_sensor)
+        self.create_subscription(Odometry, '/target/odometry', self.target_odom_cb, 10)
 
-    # Callbacks
-    def detection_callback(self, msg: Detection2DArray) -> None:
-        """
-        Called when YOLO publish new detection
-        Updates the internal state estimate of the target position
-        """
-        if not msg.detections:
-            return
-        try:
-            detection = msg.detections[0]
-            self.target_center_x = detection.bbox.center.position.x
-            self.target_center_y = detection.bbox.center.position.y
-            self.last_detection_time = time.time()
+        # Main control loop running at 20 Hz
+        self.timer = self.create_timer(0.05, self.control_loop)
+        self.heartbeat_counter = 0
 
-            if not self.target_visible:
-                self.target_visible = True
-                self.get_logger().info("Target Acquired!")
-        except IndexError:
-            pass
-    
-    def vehicle_status_callback(self, msg: VehicleStatus) -> None:
-        """
-        Monitor arming state
-        """
+        self.get_logger().info("Tracker node started. Waiting for EKF data.")
+        self.get_logger().info("Set 'enable_control' parameter to true to start moving.")
+
+    # Callback Functions
+    def status_cb(self, msg: VehicleStatus):
         self.nav_state = msg.nav_state
         self.arming_state = msg.arming_state
-    
-    # Main control logic
-    def control_loop(self) -> None:
-        """
-        Executed at 20hz
-        - Check params
-        - Send heartbeat
-        - Calculate p-control
-        - Publish velocity
-        """
 
-        try:
-            self.enable_control = self.get_parameter("enable_control").get_parameter_value().bool_value
-        except:
-            pass
+    def drone_odom_cb(self, msg: VehicleOdometry):
+        self.drone_pos = np.array([msg.position[0], msg.position[1], msg.position[2]])
+        self.drone_yaw = get_yaw_from_q(msg.q)
 
-        self.publish_offboard_mode() # px4 hearbeat
+    def target_odom_cb(self, msg: Odometry):
+        x = msg.pose.pose.position.x
+        y = msg.pose.pose.position.y
+        z = msg.pose.pose.position.z
 
-        # Safety
+        if any(math.isnan(v) or math.isinf(v) for v in [x, y, z]):
+            self.get_logger().warn("Invalid position data received from EKF skipping this data.")
+            return
+
+        self.target_pos = np.array([x, y, z])
+        self.last_target_time = self.get_clock().now()
+
+    # Control Loop
+    def control_loop(self):
+        self.enable_control = self.get_parameter("enable_control").value
+
+        # Heartbeat to keep PX4 in offboard mode
+        self.publish_offboard_mode()
+
+        # If control is disabled keep the drone in place
         if not self.enable_control:
             self.publish_trajectory_setpoint(0.0, 0.0, 0.0, 0.0)
             return
-        
-        # Logic evaluated every 0.5s to reduce mavlink bus congestion
-        if self.command_counter % 10 == 0:
-            if self.nav_state != 14: # Offboard mode if not active
-                self.engage_offboard_mode()
-                self.get_logger().info("Switching to offboard mode")
-            elif self.arming_state != 2: # Disarm
+
+        # Arming and offboard mode transitions
+        if self.heartbeat_counter % 10 == 0:
+            if self.arming_state != VehicleStatus.ARMING_STATE_ARMED:
+                self.get_logger().info("Arming drone...")
                 self.arm()
-                self.get_logger().info("Arming")
-        
-        self.command_counter += 1
-        # ---------------------------------------------
+            elif self.nav_state != VehicleStatus.NAVIGATION_STATE_OFFBOARD:
+                self.get_logger().info("Switching to offboard mode...")
+                self.engage_offboard_mode()
+        self.heartbeat_counter += 1
 
-        # Target visibilty
-        current_time = time.time()
-        if(current_time - self.last_detection_time) > self.target_timeout:
-            if self.target_visible:
-                self.target_visible = False
-                self.get_logger().warn("Target lost")
-            
-            # Stop all movement
+        if self.nav_state != VehicleStatus.NAVIGATION_STATE_OFFBOARD:
             self.publish_trajectory_setpoint(0.0, 0.0, 0.0, 0.0)
-
-        # Validity check    
-        if self.target_center_x is None or self.target_center_y is None:
             return
 
-        # P-Control
-
-        # Yaw control
-        # Direct relatioship +Error -> +Control
-        error_x = self.target_center_x - self.cx
-
-        if abs(error_x) > self.deadzone_x:
-            yaw_speed = self.kp_yaw * error_x
-        else:
-            yaw_speed = 0.0
+        # Failsafe
+        time_since_target = (self.get_clock().now() - self.last_target_time).nanoseconds / 1e9
+        if self.target_pos is None or time_since_target > self.target_timeout_sec:
+            if self.heartbeat_counter % 20 == 0:
+                self.get_logger().warn("Target lost or too old. Hovering...")
+            self.publish_trajectory_setpoint(0.0, 0.0, 0.0, 0.0)
+            return
         
-        # Altitude control
-        # Inverse relationship +Error -> -Control
-        error_y = self.cy - self.target_center_y
-        velocity_z = -(self.kp_z * error_y)
+        # Distance vectors between drone and target
+        dx = self.target_pos[0] - self.drone_pos[0]
+        dy = self.target_pos[1] - self.drone_pos[1]
+        
+        dist_xy = math.sqrt(dx**2 + dy**2)
+        target_angle = math.atan2(dy, dx)
+        
+        # YAW Control
+        yaw_error = wrap_pi(target_angle - self.drone_yaw)
+        v_yaw = self.kp_yaw * yaw_error
+        v_yaw = np.clip(v_yaw, -1.5, 1.5)
+        
+        speed_xy = self.kp_xy * dist_xy
+        speed_xy = np.clip(speed_xy, -self.max_speed, self.max_speed)
+        
+        # Split calculated speed into world frame components
+        v_x = speed_xy * math.cos(target_angle)
+        v_y = speed_xy * math.sin(target_angle)
 
-        # Limit yaw rate to +- 0.5 rad/s
-        yaw_speed = np.clip(yaw_speed, -0.5, 0.5)
+        # Altitude Control
+        desired_z = self.target_pos[2] - 1.0
+        z_error = desired_z - self.drone_pos[2]
+        
+        v_z = self.kp_z * z_error
+        v_z = np.clip(v_z, -2.0, 2.0) 
 
-        # Limit vertical speed
-        velocity_z = np.clip(velocity_z, -0.5, 0.5)
+        # Send all calculated speeds to PX4
+        self.publish_trajectory_setpoint(v_x, v_y, v_z, v_yaw)
 
-        self.publish_trajectory_setpoint(
-            vx=0.0,
-            vy=0.0,
-            vz=velocity_z,
-            yawspeed= yaw_speed
-        )
-
-    # Helper functions
     def arm(self):
-        """Start"""
         self.publish_vehicle_command(VehicleCommand.VEHICLE_CMD_COMPONENT_ARM_DISARM, param1=1.0)
 
     def engage_offboard_mode(self):
-        """Offboard"""
         self.publish_vehicle_command(
             VehicleCommand.VEHICLE_CMD_DO_SET_MODE,
-            param1=1.0, # Custom mode
-            param2=6.0  # Offboard mode
+            param1=1.0, 
+            param2=6.0  
         )
 
-    def publish_offboard_mode(self) -> None:
-        """
-        Publishes OffboardControlMode to notify PX4 of incoming velocity commands
-        """
+    def publish_offboard_mode(self):
         msg = OffboardControlMode()
         msg.position = False
-        msg.velocity = True   # Enable Velocity Control
+        msg.velocity = True
         msg.acceleration = False
         msg.attitude = False
         msg.body_rate = False
         msg.timestamp = int(self.get_clock().now().nanoseconds / 1000)
         self.offboard_mode_pub.publish(msg)
 
-    def publish_trajectory_setpoint(self, vx: float, vy: float, vz: float, yawspeed: float) -> None:
-        """
-        Publishes the calculated control inputs to the flight controller
-        """
+    def publish_trajectory_setpoint(self, vx: float, vy: float, vz: float, yawspeed: float):
         msg = TrajectorySetpoint()
-        msg.position = [float('nan'), float('nan'), float('nan')] # Position control disabled
+        msg.position = [float('nan'), float('nan'), float('nan')]
         msg.velocity = [vx, vy, vz]
         msg.yaw = float('nan')
         msg.yawspeed = yawspeed
@@ -249,10 +186,9 @@ class VisualTracker(Node):
         self.trajectory_pub.publish(msg)
 
     def publish_vehicle_command(self, command, param1=0.0, param2=0.0):
-        """Generic helper to send MAVLink commands to the FMU."""
         msg = VehicleCommand()
-        msg.param1 = param1
-        msg.param2 = param2
+        msg.param1 = float(param1)
+        msg.param2 = float(param2)
         msg.command = command
         msg.target_system = 1
         msg.target_component = 1
@@ -260,19 +196,18 @@ class VisualTracker(Node):
         msg.source_component = 1
         msg.from_external = True
         msg.timestamp = int(self.get_clock().now().nanoseconds / 1000)
-        self.vehicle_command_pub.publish(msg)
+        self.vehicle_cmd_pub.publish(msg)
 
-def main(args: str = None) -> None:
+def main(args=None):
     rclpy.init(args=args)
-    tracker = VisualTracker()
-    
+    tracker = TargetTrackerNode()
     try:
         rclpy.spin(tracker)
     except KeyboardInterrupt:
         pass
     finally:
         tracker.destroy_node()
-        rclpy.shutdown()
+        if rclpy.ok(): rclpy.shutdown()
 
 if __name__ == '__main__':
     main()
